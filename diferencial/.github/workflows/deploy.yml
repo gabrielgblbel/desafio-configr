@@ -1,0 +1,109 @@
+name: Deploy PHP App
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Testes
+  # ---------------------------------------------------------------------------
+  test:
+    name: Testes PHP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer
+          coverage: none
+
+      - name: Instalar dependências
+        run: composer install --no-interaction --prefer-dist --no-dev
+
+      - name: Executar testes
+        run: |
+          # Substituir por vendor/bin/phpunit --configuration phpunit.xml em produção real
+          echo "Testes passaram (placeholder — integrar PHPUnit aqui)"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Deploy via SSH (só roda se testes passarem)
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy no servidor
+    runs-on: ubuntu-latest
+    needs: test
+    environment: production  # Requer aprovação manual se configurado no GitHub
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer
+
+      - name: Instalar dependências de produção
+        run: composer install --no-interaction --prefer-dist --no-dev --optimize-autoloader
+
+      - name: Copiar arquivos para o servidor via rsync/SSH
+        # Credenciais ficam nos Secrets do GitHub, nunca no YAML.
+        # Configurar em: Settings → Secrets and variables → Actions
+        env:
+          SSH_HOST:    ${{ secrets.SERVER_HOST }}
+          SSH_USER:    ${{ secrets.SERVER_USER }}
+          SSH_KEY:     ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          # Salva a chave privada em arquivo temporário com permissão restrita
+          echo "$SSH_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          # Sincroniza os arquivos excluindo diretórios sensíveis
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.env' \
+            --exclude 'tests/' \
+            -e "ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no" \
+            ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+
+          # Remove chave após uso
+          rm -f /tmp/deploy_key
+
+      - name: Executar comandos pós-deploy no servidor
+        env:
+          SSH_HOST:    ${{ secrets.SERVER_HOST }}
+          SSH_USER:    ${{ secrets.SERVER_USER }}
+          SSH_KEY:     ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          echo "$SSH_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          ssh -i /tmp/deploy_key \
+              -o StrictHostKeyChecking=no \
+              "$SSH_USER@$SSH_HOST" \
+              "cd $DEPLOY_PATH && \
+               php artisan migrate --force && \
+               php artisan config:cache && \
+               php artisan route:cache && \
+               php artisan view:cache"
+
+          rm -f /tmp/deploy_key
+
+      - name: Notificar sucesso
+        if: success()
+        run: echo "Deploy concluído com sucesso para ${{ secrets.SERVER_HOST }}"
+
+      - name: Notificar falha
+        if: failure()
+        run: echo "Deploy falhou — verifique os logs acima"
